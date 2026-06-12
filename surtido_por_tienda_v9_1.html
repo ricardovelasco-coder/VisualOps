@@ -1,0 +1,330 @@
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+.wrap { padding: 1.25rem 1.5rem; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #fff; }
+.header { margin-bottom: 1.25rem; }
+.header h2 { font-size: 17px; font-weight: 500; color: #111; margin-bottom: 3px; }
+.header p { font-size: 12px; color: #888; }
+.controls { display: flex; align-items: center; gap: 10px; margin-bottom: 1.25rem; flex-wrap: wrap; }
+.controls label { font-size: 13px; color: #555; font-weight: 500; }
+select { height: 34px; padding: 0 10px; border: 1px solid #ddd; border-radius: 7px; font-size: 13px; background: #fff; color: #111; min-width: 180px; cursor: pointer; outline: none; }
+select:focus { border-color: #999; }
+.badge { background: #f5f5f5; color: #555; font-size: 12px; padding: 4px 10px; border-radius: 20px; }
+.badge b { color: #111; }
+
+/* Cuadro resumen SKU */
+.sku-summary { margin-bottom: 1.25rem; }
+.sku-summary-title { font-size: 12px; font-weight: 600; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+.sku-cards { display: flex; flex-wrap: wrap; gap: 8px; }
+.sku-card { background: #f8f8f8; border: 1px solid #ebebeb; border-radius: 8px; padding: 8px 14px; min-width: 140px; }
+.sku-card .store-name { font-size: 11px; color: #888; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
+.sku-card .sku-count { font-size: 20px; font-weight: 600; color: #c0392b; line-height: 1.2; }
+.sku-card .sku-label { font-size: 10px; color: #aaa; }
+.sku-card.highlighted { border-color: #fcc; background: #fff5f5; }
+.sku-card.highlighted .sku-count { color: #c0392b; }
+
+/* Tabla */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead tr { border-bottom: 2px solid #ebebeb; }
+thead th { text-align: left; padding: 7px 10px; font-size: 11px; font-weight: 600; color: #999; text-transform: uppercase; letter-spacing: 0.05em; }
+th.r, td.r { text-align: right; }
+tbody tr { border-bottom: 0.5px solid #f2f2f2; }
+tbody tr:hover { background: #fafafa; }
+tbody td { padding: 8px 10px; color: #111; vertical-align: middle; }
+td.num { color: #bbb; font-size: 11px; width: 24px; text-align: right; }
+td.tienda-col { font-size: 12px; color: #555; white-space: nowrap; }
+td.zona-col { font-size: 12px; color: #777; white-space: nowrap; }
+td.ean { font-family: 'SF Mono','Fira Mono',monospace; font-size: 11.5px; color: #666; white-space: nowrap; }
+td.prod { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td.uds { font-weight: 500; font-variant-numeric: tabular-nums; }
+td.c-hi { color: #1a7a32; }
+td.c-md { color: #b36200; }
+td.c-lo { color: #333; }
+.table-wrap { border: 1px solid #ebebeb; border-radius: 9px; overflow: hidden; }
+.loader { text-align: center; padding: 3rem; color: #aaa; font-size: 13px; }
+.error-box { padding: 1rem 1.25rem; background: #fff8f8; border: 1px solid #fdd; border-radius: 8px; color: #c0392b; font-size: 12px; line-height: 1.8; }
+.footer { margin-top: 8px; font-size: 11px; color: #ccc; text-align: right; }
+</style>
+
+<div class="wrap">
+  <div class="header">
+    <h2>Surtido por tienda</h2>
+    <p>SKUs sin surtir en picking · primeras 20 líneas por tienda · fuente: Aleph → Google Sheets</p>
+    <p id="ultima-act" style="font-size:12px;color:#aaa;margin-top:2px"></p>
+    <p id="countdown" style="font-size:12px;color:#bbb;margin-top:2px"></p>
+  </div>
+  <div class="controls">
+    <label for="sel">Tienda</label>
+    <select id="sel" disabled><option>Cargando…</option></select>
+    <div class="badge" id="badge" style="display:none"><b id="cnt">0</b> productos</div>
+  </div>
+  <div class="sku-summary" id="sku-summary" style="display:none">
+    <div class="sku-summary-title">SKUs diferentes sin surtir por tienda</div>
+    <div class="sku-cards" id="sku-cards"></div>
+  </div>
+  <div id="content"><div class="loader">Conectando con Google Sheets…</div></div>
+  <div class="footer" id="ts"></div>
+</div>
+
+<script>
+const SHEET_ID = '1gV2mNRXIh15Wmc-R_dUyp3aybezsuyqoxwKKFodykYQ';
+const API_KEY  = 'AIzaSyBjTToR0Dwlw3Z6qIlCV5lG9FV4Lf8eWmU';
+const ALL_OPT  = '__TODAS__';
+
+let allRows = [];
+let skuByTienda = {}; // { tienda: Set of EANs }
+
+function norm(s){ return (s||'').toString().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim(); }
+
+function findCol(headers, keywords) {
+  const h = headers.map(x => norm(x).replace(/\s+/g,'_'));
+  for (const kw of keywords) {
+    const i = h.findIndex(x => x.includes(kw));
+    if (i !== -1) return i;
+  }
+  return -1;
+}
+
+async function apiFetch(path) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}${path}&key=${API_KEY}`;
+  const r = await fetch(url);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error?.message || `HTTP ${r.status}`);
+  return j;
+}
+
+function renderSkuSummary(selectedTienda) {
+  const summary = document.getElementById('sku-summary');
+  const cards   = document.getElementById('sku-cards');
+  const tiendas = Object.keys(skuByTienda).sort((a,b) => a.localeCompare(b,'es'));
+
+  const toShow = selectedTienda === ALL_OPT
+    ? tiendas
+    : tiendas.filter(t => t === selectedTienda);
+
+  if (!toShow.length) { summary.style.display = 'none'; return; }
+
+  cards.innerHTML = toShow.map(t => {
+    const count = skuByTienda[t].size;
+    const isSelected = selectedTienda !== ALL_OPT;
+    return `<div class="sku-card${isSelected ? ' highlighted' : ''}">
+      <div class="store-name">${t}</div>
+      <div class="sku-count">${count.toLocaleString('es-CO')}</div>
+      <div class="sku-label">SKUs sin surtir</div>
+    </div>`;
+  }).join('');
+
+  summary.style.display = 'block';
+}
+
+function renderTable(selectedTienda) {
+  const isAll = selectedTienda === ALL_OPT;
+
+  // Para "todas": primeras 20 por cada tienda, luego aplanar
+  let rows;
+  if (isAll) {
+    const tiendas = [...new Set(allRows.map(r => r.tienda))].sort((a,b) => a.localeCompare(b,'es'));
+    rows = tiendas.flatMap(t => allRows.filter(r => r.tienda === t).slice(0, 20));
+  } else {
+    rows = allRows.filter(r => r.tienda === selectedTienda).slice(0, 20);
+  }
+
+  document.getElementById('badge').style.display = 'inline-block';
+  document.getElementById('cnt').textContent = rows.length;
+
+  if (!rows.length) {
+    document.getElementById('content').innerHTML =
+      '<div style="text-align:center;padding:2rem;color:#aaa;font-size:13px">Sin productos para esta tienda.</div>';
+    return;
+  }
+
+  const mx = Math.max(...rows.map(r => r.uds), 1);
+  const showTiendaCol = isAll;
+
+  const trs = rows.map((r, i) => {
+    const ratio = r.uds / mx;
+    const cls = ratio >= 0.6 ? 'c-hi' : ratio >= 0.25 ? 'c-md' : 'c-lo';
+    const prod = r.producto.length > 48 ? r.producto.slice(0,48)+'…' : r.producto;
+    const tiendaCell = showTiendaCol ? `<td class="tienda-col">${r.tienda}</td>` : '';
+    const zonaCell = `<td class="zona-col">${r.zona}</td>`;
+    return `<tr>
+      <td class="num">${i+1}</td>
+      ${tiendaCell}
+      ${zonaCell}
+      <td class="ean">${r.ean}</td>
+      <td class="prod" title="${r.producto.replace(/"/g,'&quot;')}">${prod}</td>
+      <td class="uds r ${cls}">${r.uds.toLocaleString('es-CO')}</td>
+    </tr>`;
+  }).join('');
+
+  const tiendaHeader = showTiendaCol ? '<th>Tienda</th>' : '';
+
+  document.getElementById('content').innerHTML = `
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th style="width:24px"></th>
+          ${tiendaHeader}
+          <th>Zona</th>
+          <th>EAN</th>
+          <th>Producto</th>
+          <th class="r">Uds. a surtir</th>
+        </tr></thead>
+        <tbody>${trs}</tbody>
+      </table>
+    </div>`;
+
+  renderSkuSummary(selectedTienda);
+}
+
+(async () => {
+  try {
+    const meta = await apiFetch('?fields=sheets.properties');
+    const sheets = meta.sheets.map(s => ({
+      title: s.properties.title,
+      gid: s.properties.sheetId
+    }));
+    const allTitles = sheets.map(s => `"${s.title}"`).join(', ');
+
+    const target = sheets.find(s => norm(s.title) === 'PRODUCTOS')
+      || sheets.find(s => norm(s.title).includes('PRODUCTO'))
+      || sheets.find(s => norm(s.title).includes('PRODUCT'));
+
+    if (!target) {
+      throw new Error(`No se encontró pestaña "Productos".\nPestañas disponibles: ${allTitles}`);
+    }
+
+    const tabName = target.title;
+
+    // Leer celda C7: última actualización de datos
+    try {
+      const c7res = await apiFetch(`/values/${encodeURIComponent(tabName)}!C7?`);
+      const c7val = (c7res.values?.[0]?.[0] || '').toString().trim();
+      if (c7val) {
+        document.getElementById('ultima-act').textContent = `Última actualización: ${c7val}`;
+      }
+    } catch(_) { /* si falla no bloquea el resto */ }
+
+    let rawAll;
+    try {
+      const res = await apiFetch(`/values/${encodeURIComponent(tabName)}!B13:Z50000?`);
+      rawAll = res.values || [];
+    } catch(e1) {
+      const res = await apiFetch(`/values/gid%3D${target.gid}!B13:Z50000?`);
+      rawAll = res.values || [];
+    }
+
+    if (!rawAll.length) {
+      throw new Error(`La pestaña "${tabName}" (gid:${target.gid}) no tiene datos.\nPestañas: ${allTitles}`);
+    }
+
+    let headerRowIdx = -1;
+    for (let i = 0; i < Math.min(rawAll.length, 20); i++) {
+      const r = rawAll[i].map(c => norm(c));
+      if (r.some(c => c === 'TIENDA' || c === 'EAN' || c.includes('TIENDA'))) {
+        headerRowIdx = i;
+        break;
+      }
+    }
+
+    if (headerRowIdx === -1) {
+      const preview = rawAll.slice(0,6).map((r,i)=>`F${i+13}: ${r.slice(0,5).join(' | ')}`).join('\n');
+      throw new Error(`No se encontró fila de headers en "${tabName}".\n\nPrimeras 6 filas (desde B13):\n${preview}\n\nDime en qué fila están los encabezados.`);
+    }
+
+    const headers = rawAll[headerRowIdx];
+    const iTienda = findCol(headers, ['TIENDA','STORE','ALMACEN']);
+    const iEAN    = findCol(headers, ['EAN','CODIGO_BARRA','BARCODE']);
+    const iProd   = findCol(headers, ['PRODUCTO','PRODUCT','NOMBRE','DESCRIPCION','DESC']);
+    const iUds    = findCol(headers, ['SURTIR','A_SURTIR','UNIDADES_A','UNITS_TO','REPONER']);
+    const iZona   = findCol(headers, ['ZONA','ZONE','AREA','SECCION','PASILLO']);
+
+    if ([iTienda,iEAN,iProd,iUds].some(x => x === -1)) {
+      throw new Error(
+        `Headers en fila ${headerRowIdx+13} de "${tabName}":\n[${headers.join(' | ')}]\n\n` +
+        `Mapeo: TIENDA→col${iTienda} EAN→col${iEAN} PRODUCTO→col${iProd} SURTIR→col${iUds} ZONA→col${iZona}\n\n` +
+        `Las col en -1 no se encontraron. Dime el nombre exacto de cada columna.`
+      );
+    }
+
+    allRows = rawAll.slice(headerRowIdx + 1)
+      .filter(r => r[iTienda] && r[iTienda].toString().trim())
+      .map(r => ({
+        tienda:   (r[iTienda]||'').toString().trim(),
+        ean:      (r[iEAN]   ||'').toString().trim(),
+        producto: (r[iProd]  ||'').toString().trim(),
+        zona:     iZona !== -1 ? (r[iZona]||'').toString().trim() : '',
+        uds:      parseInt((r[iUds]||'0').toString().replace(/[^0-9-]/g,''), 10) || 0
+      }));
+
+    if (!allRows.length) {
+      throw new Error(`Headers encontrados en fila ${headerRowIdx+13} pero no hay datos debajo en "${tabName}".`);
+    }
+
+    // Calcular SKUs únicos por tienda (todos los registros, no solo los primeros 20)
+    skuByTienda = {};
+    for (const r of allRows) {
+      if (!skuByTienda[r.tienda]) skuByTienda[r.tienda] = new Set();
+      if (r.ean) skuByTienda[r.tienda].add(r.ean);
+    }
+
+    const tiendas = [...new Set(allRows.map(r => r.tienda))].sort((a,b) => a.localeCompare(b,'es'));
+    const sel = document.getElementById('sel');
+    sel.innerHTML =
+      `<option value="${ALL_OPT}">— Todas las tiendas —</option>` +
+      tiendas.map(t => `<option value="${t}">${t}</option>`).join('');
+    sel.disabled = false;
+    sel.addEventListener('change', () => renderTable(sel.value));
+
+    // Arrancar mostrando todas
+    renderTable(ALL_OPT);
+
+    document.getElementById('ts').textContent =
+      `Cargado: ${new Date().toLocaleString('es-CO',{dateStyle:'short',timeStyle:'short'})} · "${tabName}" · headers en fila ${headerRowIdx+13} · ${allRows.length} registros`;
+
+  } catch(e) {
+    document.getElementById('content').innerHTML =
+      `<div class="error-box"><b>Error al cargar datos</b><br><pre style="white-space:pre-wrap;font-family:inherit;font-size:11px">${e.message}</pre></div>`;
+    document.getElementById('sel').disabled = true;
+  }
+})();
+
+// ── Auto-refresco a XX:05:00 ──────────────────────────────────────────────
+// La data se actualiza a la hora en punto; recargamos 5 min después.
+function msHastaProximo05() {
+  const ahora = new Date();
+  const prox  = new Date(ahora);
+  prox.setSeconds(0);
+  prox.setMilliseconds(0);
+  // Avanzar hasta el próximo minuto :05
+  if (ahora.getMinutes() < 5) {
+    prox.setMinutes(5);
+  } else {
+    // Ya pasaron los :05 de esta hora → ir a la próxima hora
+    prox.setHours(prox.getHours() + 1);
+    prox.setMinutes(5);
+  }
+  return prox - ahora;
+}
+
+function programarRefresco() {
+  const ms = msHastaProximo05();
+  const prox = new Date(Date.now() + ms);
+
+  const cdEl = document.getElementById('countdown');
+
+  const interval = setInterval(() => {
+    const restante = Math.max(0, Math.round((prox - Date.now()) / 1000));
+    const mm = String(Math.floor(restante / 60)).padStart(2, '0');
+    const ss = String(restante % 60).padStart(2, '0');
+    cdEl.textContent = `⟳ Próximo refresco en ${mm}:${ss}`;
+  }, 1000);
+
+  setTimeout(() => {
+    clearInterval(interval);
+    cdEl.textContent = '⟳ Actualizando…';
+    location.reload();
+  }, ms);
+}
+
+programarRefresco();
+</script>
